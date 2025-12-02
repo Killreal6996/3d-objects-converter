@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>3MA → STL</title>
+  <title>3MA конвертер</title>
   <style>
     html, body { height: 100%; }
     body{
@@ -103,33 +103,49 @@
       <div id="scaleInfo" class="meta">Текущий масштаб: 1.0×</div>
     </div>
 
-    <h2>3) Конвертация</h2>
+    <h2>3) Экспорт</h2>
     <div class="box">
-      <button id="convertBtn" disabled>Конвертировать в STL</button>
-      <a id="downloadLink" class="download" style="display:none;" download>Скачать STL</a>
+      <label>Формат экспорта:</label>
+      <select id="formatSelect">
+        <option value="stl">STL (.stl)</option>
+        <option value="obj">OBJ (.obj)</option>
+        <option value="step">STEP (mesh AP242) (.step)</option>
+      </select>
+
+      <button id="convertBtn" disabled>Конвертировать</button>
+      <a id="downloadLink" class="download" style="display:none;" download>Скачать файл</a>
       <div id="convertInfo" class="meta"></div>
+    </div>
+
+    <h2>Офлайн-режим</h2>
+    <div class="meta">
+Рядом с HTML должны лежать:
+- three.module.js
+- OrbitControls.js (импорт из "./three.module.js")
     </div>
   </section>
 
   <section class="viewer">
-    <div class="toolbar" id="viewerInfo">Сетка, оси и “линейка” должны быть видны сразу. Модель появится после конвертации.</div>
+    <div class="toolbar" id="viewerInfo">Сетка, оси и линейка активны. Модель появится после конвертации.</div>
     <canvas id="canvas"></canvas>
   </section>
 </main>
 
 <script>
-  const fileInput    = document.getElementById("fileInput");
-  const fileInfo     = document.getElementById("fileInfo");
-  const convertBtn   = document.getElementById("convertBtn");
-  const downloadLink = document.getElementById("downloadLink");
-  const convertInfo  = document.getElementById("convertInfo");
+  const fileInput     = document.getElementById("fileInput");
+  const fileInfo      = document.getElementById("fileInfo");
+  const convertBtn    = document.getElementById("convertBtn");
+  const downloadLink  = document.getElementById("downloadLink");
+  const convertInfo   = document.getElementById("convertInfo");
+  const formatSelect  = document.getElementById("formatSelect");
 
-  const scaleInput   = document.getElementById("scaleInput");
-  const unitSelect   = document.getElementById("unitSelect");
-  const applyScaleBtn= document.getElementById("applyScaleBtn");
-  const scaleInfo    = document.getElementById("scaleInfo");
+  const scaleInput    = document.getElementById("scaleInput");
+  const unitSelect    = document.getElementById("unitSelect");
+  const applyScaleBtn = document.getElementById("applyScaleBtn");
+  const scaleInfo     = document.getElementById("scaleInfo");
 
   let currentScale = 1.0;
+  let lastModel = null;
 
   function setScaleFromUI(){
     const s = parseFloat(scaleInput.value || "1");
@@ -138,7 +154,6 @@
     scaleInfo.textContent = `Текущий масштаб: ${currentScale.toFixed(6)}×`;
     if (window.applyPreviewScale) window.applyPreviewScale(currentScale);
   }
-
   applyScaleBtn.addEventListener("click", setScaleFromUI);
 
   function parse3MA(jsonText){
@@ -188,6 +203,7 @@
     return [nx/len, ny/len, nz/len];
   }
 
+  // ---------- STL ----------
   function buildAsciiSTL(model){
     const lines=[];
     lines.push(`solid ${model.fileName}`);
@@ -196,7 +212,6 @@
       for (const [a,b,c] of tris){
         const v1=verts[a], v2=verts[b], v3=verts[c];
 
-        // применяем масштаб при экспорте
         const sv1=[v1[0]*currentScale, v1[1]*currentScale, v1[2]*currentScale];
         const sv2=[v2[0]*currentScale, v2[1]*currentScale, v2[2]*currentScale];
         const sv3=[v3[0]*currentScale, v3[1]*currentScale, v3[2]*currentScale];
@@ -215,9 +230,101 @@
     return lines.join("\n");
   }
 
+  // ---------- OBJ ----------
+  function buildOBJ(model){
+    const lines=[];
+    lines.push(`# OBJ exported from 3MA by BitA`);
+    lines.push(`o ${model.fileName}`);
+
+    // Собираем общий список вершин
+    const vOffsetByMesh = [];
+    let vCount = 0;
+
+    for (let m=0;m<model.allVertices.length;m++){
+      const verts = model.allVertices[m];
+      vOffsetByMesh[m] = vCount;
+
+      for (const v of verts){
+        lines.push(`v ${v[0]*currentScale} ${v[1]*currentScale} ${v[2]*currentScale}`);
+        vCount++;
+      }
+    }
+
+    // Фейсы
+    for (let m=0;m<model.allTriangles.length;m++){
+      const tris = model.allTriangles[m];
+      const off = vOffsetByMesh[m];
+      for (const [a,b,c] of tris){
+        // OBJ индексы 1-based
+        lines.push(`f ${a+1+off} ${b+1+off} ${c+1+off}`);
+      }
+    }
+
+    return lines.join("\n");
+  }
+
+  // ---------- STEP (тесселированный AP242) ----------
+  // Это mesh-STEP, не параметрика. Обычно открывается в CAD как "tessellated model".
+  function buildSTEP(model){
+    // Плоский список вершин (не дедуплируем, чтобы проще)
+    const vertsFlat = [];
+    const trisFlat = [];
+
+    let globalIndex = 0;
+    for (let m=0;m<model.allVertices.length;m++){
+      const verts = model.allVertices[m];
+      const tris = model.allTriangles[m];
+
+      for (const v of verts){
+        vertsFlat.push([v[0]*currentScale, v[1]*currentScale, v[2]*currentScale]);
+        globalIndex++;
+      }
+
+      const base = globalIndex - verts.length;
+      for (const [a,b,c] of tris){
+        // STEP индексы 1-based
+        trisFlat.push([a+1+base, b+1+base, c+1+base]);
+      }
+    }
+
+    const now = new Date().toISOString();
+    const ptsStr = vertsFlat.map(v => `(${v[0]},${v[1]},${v[2]})`).join(",");
+    const triStr = trisFlat.map(t => `(${t[0]},${t[1]},${t[2]})`).join(",");
+
+    // Минимальный AP242 tessellated STEP
+    const lines = [];
+    lines.push("ISO-10303-21;");
+    lines.push("HEADER;");
+    lines.push(`FILE_DESCRIPTION(('tessellated shape'),'2;1');`);
+    lines.push(`FILE_NAME('${model.fileName}.step','${now}',('BitA 3MA Converter'),('BitA'),'BitA Converter','BitA Converter','');`);
+    lines.push("FILE_SCHEMA(('AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF'));");
+    lines.push("ENDSEC;");
+    lines.push("DATA;");
+    lines.push("#10=CARTESIAN_POINT_LIST_3D('',(" + ptsStr + "));");
+    lines.push("#20=TRIANGULATED_FACE_SET('',#10,(" + triStr + "),$);");
+    lines.push("#30=GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#40))GLOBAL_UNIT_ASSIGNED_CONTEXT((#50,#51,#52))REPRESENTATION_CONTEXT('','');");
+    lines.push("#40=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-6),#50,'distance_accuracy_value','');");
+    lines.push("#50=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.));");
+    lines.push("#51=(PLANE_ANGLE_UNIT()NAMED_UNIT(*)SI_UNIT($,.RADIAN.));");
+    lines.push("#52=(SOLID_ANGLE_UNIT()NAMED_UNIT(*)SI_UNIT($,.STERADIAN.));");
+    lines.push("#60=TESSELLATED_SHAPE_REPRESENTATION('',(#20),#30);");
+    lines.push("ENDSEC;");
+    lines.push("END-ISO-10303-21;");
+    return lines.join("\n");
+  }
+
+  function exportByFormat(model, fmt){
+    if (fmt === "stl") return { text: buildAsciiSTL(model), mime: "model/stl", ext: "stl" };
+    if (fmt === "obj") return { text: buildOBJ(model), mime: "text/plain", ext: "obj" };
+    if (fmt === "step") return { text: buildSTEP(model), mime: "application/step", ext: "step" };
+    throw new Error("Неизвестный формат");
+  }
+
   fileInput.addEventListener("change", () => {
     downloadLink.style.display="none";
     convertInfo.textContent="";
+    lastModel = null;
+
     const file=fileInput.files&&fileInput.files[0];
     if(!file){ fileInfo.textContent="Файл не выбран"; convertBtn.disabled=true; return; }
     fileInfo.textContent=`Выбран: ${file.name} (${(file.size/1024).toFixed(1)} KB)`;
@@ -235,19 +342,22 @@
 
       const text=await file.text();
       const model=parse3MA(text);
-      const stlText=buildAsciiSTL(model);
+      lastModel = model;
 
-      const blob=new Blob([stlText],{type:"model/stl"});
+      const fmt = formatSelect.value;
+      const out = exportByFormat(model, fmt);
+
+      const blob=new Blob([out.text],{type:out.mime});
       const url=URL.createObjectURL(blob);
       const baseName=file.name.replace(/\.3ma$/i,"")||model.fileName;
 
       downloadLink.href=url;
-      downloadLink.download=baseName+".stl";
+      downloadLink.download=baseName+"."+out.ext;
       downloadLink.textContent="Скачать "+downloadLink.download;
       downloadLink.style.display="block";
 
       convertInfo.textContent=
-        `Готово.\nMeshes: ${model.allVertices.length}\nВершин: ${model.totalVerts}\nТреугольников: ${model.totalTris}\nМасштаб: ${currentScale.toFixed(6)}×`;
+        `Готово.\nФормат: ${fmt.toUpperCase()}\nMeshes: ${model.allVertices.length}\nВершин: ${model.totalVerts}\nТреугольников: ${model.totalTris}\nМасштаб: ${currentScale.toFixed(6)}×`;
       convertInfo.className="meta ok";
 
       if(window.renderPreview) window.renderPreview(model);
@@ -261,7 +371,6 @@
     }
   });
 
-  // применим масштаб сразу при загрузке страницы
   setScaleFromUI();
 </script>
 
@@ -274,6 +383,7 @@
 
   let renderer, scene, camera, controls, currentMesh;
   let previewScale = 1.0;
+
   const rulerGroup = new THREE.Group();
 
   function makeTextSprite(text){
@@ -311,19 +421,16 @@
     for (let i=0;i<=tickCount;i++){
       const t = i*tickStep;
 
-      // X axis ticks
       addTick(t,0,0, 0, tickLen, 0);
       const sx = makeTextSprite(String(i));
       sx.position.set(t, 0.18, 0);
       rulerGroup.add(sx);
 
-      // Y axis ticks
       addTick(0,t,0, tickLen, 0, 0);
       const sy = makeTextSprite(String(i));
       sy.position.set(0.18, t, 0);
       rulerGroup.add(sy);
 
-      // Z axis ticks
       addTick(0,0,t, tickLen, 0, 0);
       const sz = makeTextSprite(String(i));
       sz.position.set(0.18, 0, t);
@@ -334,7 +441,6 @@
     const lines = new THREE.LineSegments(geom, mat);
     rulerGroup.add(lines);
 
-    // Названия осей
     const ax = makeTextSprite("X");
     ax.position.set(tickCount*tickStep + 0.4, 0, 0); rulerGroup.add(ax);
     const ay = makeTextSprite("Y");
@@ -365,7 +471,6 @@
 
     scene.add(new THREE.GridHelper(20, 40, 0x2a2f4a, 0x1b1f33));
     scene.add(new THREE.AxesHelper(2));
-
     scene.add(buildRuler({tickStep:1, tickCount:10}));
 
     onResize();
@@ -426,7 +531,6 @@
 
   window.applyPreviewScale = function(scale){
     previewScale = scale || 1.0;
-    // если модель уже на сцене — пересоберём её
     if (window._lastModelForPreview) window.renderPreview(window._lastModelForPreview);
   };
 
