@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>3MA конвертер</title>
   <style>
     html, body { height: 100%; }
@@ -11,9 +11,9 @@
       margin:0;background:#0f1220;color:#e6e8ef;
     }
     header{
-      padding:16px 20px;border-bottom:1px solid #22253a;
+      padding:12px 16px;border-bottom:1px solid #22253a;
       display:flex;gap:12px;align-items:center;
-      height:58px;box-sizing:border-box;
+      min-height:58px;box-sizing:border-box;
     }
     main{
       display:grid;grid-template-columns:360px 1fr;
@@ -71,6 +71,63 @@
       padding:10px 12px;border-radius:10px;color:#cfe0ff;text-decoration:none;
       border:1px solid #2a2f4a;
     }
+
+    /* ---------- Мобильная компоновка ---------- */
+    @media (max-width: 900px){
+      main{
+        grid-template-columns: 1fr;
+        grid-template-rows: auto 1fr; /* меню + просмотр */
+        height: calc(100vh - 58px);
+      }
+      .panel{
+        border-right:none;
+        border-bottom:1px solid #22253a;
+        max-height:45vh;
+        overflow:auto;
+      }
+      .viewer{
+        height:55vh;
+        min-height:260px;
+      }
+      header strong{
+        font-size:15px;
+        line-height:1.2;
+      }
+    }
+
+    /* ---------- Состояние: меню свернуто ---------- */
+    body.menu-collapsed main{
+      grid-template-rows: 0px 1fr;
+    }
+    body.menu-collapsed .panel{
+      padding:0;
+      border:none;
+      max-height:0;
+      overflow:hidden;
+    }
+    body.menu-collapsed .viewer{
+      height: calc(100vh - 58px);
+    }
+
+    /* ---------- Плавающая кнопка ---------- */
+    .fab{
+      position:absolute;
+      right:14px; bottom:14px;
+      z-index:5;
+      width:auto; min-width:120px;
+      padding:10px 14px;
+      border-radius:999px;
+      background:#4b7cff;
+      border:1px solid #2a2f4a;
+      color:#fff; font-weight:700;
+      box-shadow:0 8px 24px rgba(0,0,0,.35);
+      cursor:pointer;
+      user-select:none;
+      touch-action:manipulation;
+    }
+    @media (min-width: 901px){
+      .fab{ display:none; } /* на десктопе не показываем */
+    }
   </style>
 </head>
 <body>
@@ -83,7 +140,7 @@
     <h2>1) Загрузка .3ma</h2>
     <div class="box">
       <label>Выберите файл .3ma:</label>
-      <input id="fileInput" type="file" accept=".3ma,application/json,text/plain" />
+      <input id="fileInput" type="file" accept=".3ma,application/json,text/plain,*/*" />
       <div id="fileInfo" class="meta">Файл не выбран</div>
     </div>
 
@@ -128,6 +185,9 @@
   <section class="viewer">
     <div class="toolbar" id="viewerInfo">Сетка, оси и линейка активны. Модель появится после конвертации.</div>
     <canvas id="canvas"></canvas>
+
+    <!-- Плавающая кнопка (только мобилка) -->
+    <button id="fabToggleBtn" class="fab">Меню</button>
   </section>
 </main>
 
@@ -144,9 +204,32 @@
   const applyScaleBtn = document.getElementById("applyScaleBtn");
   const scaleInfo     = document.getElementById("scaleInfo");
 
+  const fabToggleBtn  = document.getElementById("fabToggleBtn");
+
   let currentScale = 1.0;
   let lastModel = null;
 
+  // ----- Меню сворачивания -----
+  let collapsed = false;
+  function setCollapsed(v){
+    collapsed = v;
+    document.body.classList.toggle("menu-collapsed", collapsed);
+    fabToggleBtn.textContent = collapsed ? "Меню" : "Просмотр";
+
+    // пересчёт canvas
+    window.dispatchEvent(new Event("resize"));
+    setTimeout(()=>window.dispatchEvent(new Event("resize")), 150);
+  }
+  fabToggleBtn.addEventListener("click", ()=> setCollapsed(!collapsed));
+
+  function autoCollapseOnMobile(){
+    if (window.innerWidth <= 900) setCollapsed(true);
+    else setCollapsed(false);
+  }
+  window.addEventListener("resize", autoCollapseOnMobile);
+  autoCollapseOnMobile();
+
+  // ----- Масштаб -----
   function setScaleFromUI(){
     const s = parseFloat(scaleInput.value || "1");
     const unitMul = parseFloat(unitSelect.value || "1");
@@ -156,6 +239,7 @@
   }
   applyScaleBtn.addEventListener("click", setScaleFromUI);
 
+  // ----- Парсинг 3MA -----
   function parse3MA(jsonText){
     const data = JSON.parse(jsonText);
     if (!data.meshes || !Array.isArray(data.meshes) || data.meshes.length === 0) {
@@ -236,7 +320,6 @@
     lines.push(`# OBJ exported from 3MA by BitA`);
     lines.push(`o ${model.fileName}`);
 
-    // Собираем общий список вершин
     const vOffsetByMesh = [];
     let vCount = 0;
 
@@ -250,12 +333,10 @@
       }
     }
 
-    // Фейсы
     for (let m=0;m<model.allTriangles.length;m++){
       const tris = model.allTriangles[m];
       const off = vOffsetByMesh[m];
       for (const [a,b,c] of tris){
-        // OBJ индексы 1-based
         lines.push(`f ${a+1+off} ${b+1+off} ${c+1+off}`);
       }
     }
@@ -264,9 +345,7 @@
   }
 
   // ---------- STEP (тесселированный AP242) ----------
-  // Это mesh-STEP, не параметрика. Обычно открывается в CAD как "tessellated model".
   function buildSTEP(model){
-    // Плоский список вершин (не дедуплируем, чтобы проще)
     const vertsFlat = [];
     const trisFlat = [];
 
@@ -282,7 +361,6 @@
 
       const base = globalIndex - verts.length;
       for (const [a,b,c] of tris){
-        // STEP индексы 1-based
         trisFlat.push([a+1+base, b+1+base, c+1+base]);
       }
     }
@@ -291,7 +369,6 @@
     const ptsStr = vertsFlat.map(v => `(${v[0]},${v[1]},${v[2]})`).join(",");
     const triStr = trisFlat.map(t => `(${t[0]},${t[1]},${t[2]})`).join(",");
 
-    // Минимальный AP242 tessellated STEP
     const lines = [];
     lines.push("ISO-10303-21;");
     lines.push("HEADER;");
@@ -329,6 +406,9 @@
     if(!file){ fileInfo.textContent="Файл не выбран"; convertBtn.disabled=true; return; }
     fileInfo.textContent=`Выбран: ${file.name} (${(file.size/1024).toFixed(1)} KB)`;
     convertBtn.disabled=false;
+
+    // на мобиле при выборе файла — показываем меню (если было свернуто)
+    if (window.innerWidth <= 900) setCollapsed(false);
   });
 
   convertBtn.addEventListener("click", async () => {
@@ -361,6 +441,9 @@
       convertInfo.className="meta ok";
 
       if(window.renderPreview) window.renderPreview(model);
+
+      // после конвертации на мобиле — сворачиваем меню, чтобы смотреть модель
+      if (window.innerWidth <= 900) setCollapsed(true);
 
     }catch(err){
       convertInfo.textContent="Ошибка: "+err.message;
@@ -463,6 +546,10 @@
 
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.zoomSpeed = 1.2;
+    controls.rotateSpeed = 0.8;
+    controls.panSpeed = 0.8;
 
     scene.add(new THREE.HemisphereLight(0xffffff, 0x223355, 1.0));
     const dir = new THREE.DirectionalLight(0xffffff, 0.8);
@@ -476,7 +563,7 @@
     onResize();
     animate();
 
-    viewerInfo.textContent = "Сетка, оси и линейка активны. После конвертации появится модель.";
+    viewerInfo.textContent = "Сетка, оси и линейка активны. Модель появится после конвертации.";
   }
 
   function onResize(){
