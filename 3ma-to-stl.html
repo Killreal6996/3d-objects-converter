@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>3MA → STL (offline)</title>
+  <style>
+    html, body { height: 100%; }
+    body{
+      font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+      margin:0;background:#0f1220;color:#e6e8ef;
+    }
+    header{
+      padding:16px 20px;border-bottom:1px solid #22253a;
+      display:flex;gap:12px;align-items:center;
+      height:58px;box-sizing:border-box;
+    }
+    main{
+      display:grid;grid-template-columns:360px 1fr;
+      height:calc(100vh - 58px);
+    }
+    .panel{
+      padding:16px 20px;border-right:1px solid #22253a;background:#111427;
+      box-sizing:border-box;overflow:auto;
+    }
+    .panel h2{font-size:16px;margin:8px 0 12px;}
+    .panel .box{
+      background:#0c0f1f;border:1px dashed #2a2f4a;border-radius:10px;
+      padding:14px;margin-bottom:12px;
+    }
+    .panel label{display:block;font-size:13px;color:#aab0c5;margin-bottom:6px;}
+    input[type=file]{width:100%;color:#cfd3e3;}
+    button{
+      width:100%;padding:10px 12px;border:0;border-radius:10px;
+      background:#4b7cff;color:white;font-weight:600;cursor:pointer;
+    }
+    button:disabled{opacity:.5;cursor:not-allowed;}
+    .meta{font-size:12px;color:#aab0c5;line-height:1.5;margin-top:8px;white-space:pre-wrap;}
+    .error{color:#ffb4b4;}
+    .ok{color:#b8ffc7;}
+
+    .viewer{
+      position:relative;
+      height:100%;
+      min-height:0;
+      overflow:hidden;
+      background:#0f1220;
+    }
+    /* canvas растягиваем абсолютом — так он точно не будет 0px */
+    #canvas{
+      position:absolute; inset:0;
+      width:100%; height:100%;
+      display:block;
+    }
+    .toolbar{
+      position:absolute;top:12px;left:12px;
+      background:#0c0f1fcc;border:1px solid #22253a;border-radius:10px;
+      padding:8px 10px;font-size:12px;color:#cfd3e3;backdrop-filter: blur(4px);
+      z-index:2; max-width:70%;
+    }
+    a.download{
+      display:block;text-align:center;margin-top:10px;background:#1a1f36;
+      padding:10px 12px;border-radius:10px;color:#cfe0ff;text-decoration:none;
+      border:1px solid #2a2f4a;
+    }
+  </style>
+</head>
+<body>
+<header>
+  <strong>3MA → STL</strong>
+  <span style="font-size:12px;color:#aab0c5">Полностью офлайн</span>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>1) Загрузка .3ma</h2>
+    <div class="box">
+      <label>Выберите файл .3ma:</label>
+      <input id="fileInput" type="file" accept=".3ma,application/json,text/plain" />
+      <div id="fileInfo" class="meta">Файл не выбран</div>
+    </div>
+
+    <h2>2) Конвертация</h2>
+    <div class="box">
+      <button id="convertBtn" disabled>Конвертировать в STL</button>
+      <a id="downloadLink" class="download" style="display:none;" download>Скачать STL</a>
+      <div id="convertInfo" class="meta"></div>
+    </div>
+
+    <h2>Офлайн-режим</h2>
+    <div class="meta">
+Рядом с HTML должны лежать:
+- three.module.js
+- OrbitControls.js (импорт из "./three.module.js")
+    </div>
+  </section>
+
+  <section class="viewer">
+    <div class="toolbar" id="viewerInfo">Если WebGL доступен, вы увидите сетку и оси сразу.</div>
+    <canvas id="canvas"></canvas>
+  </section>
+</main>
+
+<script>
+  const fileInput    = document.getElementById("fileInput");
+  const fileInfo     = document.getElementById("fileInfo");
+  const convertBtn   = document.getElementById("convertBtn");
+  const downloadLink = document.getElementById("downloadLink");
+  const convertInfo  = document.getElementById("convertInfo");
+
+  function parse3MA(jsonText){
+    const data = JSON.parse(jsonText);
+    if (!data.meshes || !Array.isArray(data.meshes) || data.meshes.length === 0) {
+      throw new Error("В файле нет meshes");
+    }
+
+    const allVertices = [];
+    const allTriangles = [];
+    let totalTris = 0, totalVerts = 0;
+
+    for (const mesh of data.meshes){
+      const pf = mesh.preciseFactor || 1;
+      const posFlat = mesh._positions || mesh.positions;
+      const idxFlat = mesh._posIndexis || mesh.triangles;
+      if (!posFlat || !idxFlat) continue;
+
+      const vertices = [];
+      for (let i=0;i<posFlat.length;i+=3){
+        vertices.push([posFlat[i]/pf, posFlat[i+1]/pf, posFlat[i+2]/pf]);
+      }
+
+      if (idxFlat.length % 3 !== 0){
+        throw new Error("Длина индексов треугольников не кратна 3");
+      }
+
+      const triangles = [];
+      for (let i=0;i<idxFlat.length;i+=3){
+        triangles.push([idxFlat[i], idxFlat[i+1], idxFlat[i+2]]);
+      }
+
+      allVertices.push(vertices);
+      allTriangles.push(triangles);
+      totalVerts += vertices.length;
+      totalTris  += triangles.length;
+    }
+
+    return { fileName: data.fileName || "model", allVertices, allTriangles, totalVerts, totalTris };
+  }
+
+  function calcNormal(v1, v2, v3){
+    const ax=v2[0]-v1[0], ay=v2[1]-v1[1], az=v2[2]-v1[2];
+    const bx=v3[0]-v1[0], by=v3[1]-v1[1], bz=v3[2]-v1[2];
+    let nx=ay*bz-az*by, ny=az*bx-ax*bz, nz=ax*by-ay*bx;
+    const len=Math.hypot(nx,ny,nz)||1;
+    return [nx/len, ny/len, nz/len];
+  }
+
+  function buildAsciiSTL(model){
+    const lines=[];
+    lines.push(`solid ${model.fileName}`);
+    for (let m=0;m<model.allVertices.length;m++){
+      const verts=model.allVertices[m], tris=model.allTriangles[m];
+      for (const [a,b,c] of tris){
+        const v1=verts[a], v2=verts[b], v3=verts[c];
+        const [nx,ny,nz]=calcNormal(v1,v2,v3);
+        lines.push(`  facet normal ${nx} ${ny} ${nz}`);
+        lines.push(`    outer loop`);
+        lines.push(`      vertex ${v1[0]} ${v1[1]} ${v1[2]}`);
+        lines.push(`      vertex ${v2[0]} ${v2[1]} ${v2[2]}`);
+        lines.push(`      vertex ${v3[0]} ${v3[1]} ${v3[2]}`);
+        lines.push(`    endloop`);
+        lines.push(`  endfacet`);
+      }
+    }
+    lines.push(`endsolid ${model.fileName}`);
+    return lines.join("\n");
+  }
+
+  fileInput.addEventListener("change", () => {
+    downloadLink.style.display="none";
+    convertInfo.textContent="";
+    const file=fileInput.files&&fileInput.files[0];
+    if(!file){ fileInfo.textContent="Файл не выбран"; convertBtn.disabled=true; return; }
+    fileInfo.textContent=`Выбран: ${file.name} (${(file.size/1024).toFixed(1)} KB)`;
+    convertBtn.disabled=false;
+  });
+
+  convertBtn.addEventListener("click", async () => {
+    convertBtn.disabled=true;
+    convertInfo.className="meta";
+    convertInfo.textContent="Конвертирую...";
+    try{
+      const file=fileInput.files&&fileInput.files[0];
+      if(!file) throw new Error("Файл не выбран");
+      const text=await file.text();
+      const model=parse3MA(text);
+      const stlText=buildAsciiSTL(model);
+
+      const blob=new Blob([stlText],{type:"model/stl"});
+      const url=URL.createObjectURL(blob);
+      const baseName=file.name.replace(/\.3ma$/i,"")||model.fileName;
+
+      downloadLink.href=url;
+      downloadLink.download=baseName+".stl";
+      downloadLink.textContent="Скачать "+downloadLink.download;
+      downloadLink.style.display="block";
+
+      convertInfo.textContent=`Готово.\nMeshes: ${model.allVertices.length}\nВершин: ${model.totalVerts}\nТреугольников: ${model.totalTris}`;
+      convertInfo.className="meta ok";
+
+      if(window.renderPreview) window.renderPreview(model);
+    }catch(err){
+      convertInfo.textContent="Ошибка: "+err.message;
+      convertInfo.className="meta error";
+      document.getElementById("viewerInfo").textContent="Не удалось построить предпросмотр";
+    }finally{
+      convertBtn.disabled=false;
+    }
+  });
+</script>
+
+<script type="module">
+  import * as THREE from "./three.module.js";
+  import { OrbitControls } from "./OrbitControls.js";
+
+  const canvas = document.getElementById("canvas");
+  const viewerInfo = document.getElementById("viewerInfo");
+
+  // Проверка WebGL
+  const gl = canvas.getContext("webgl2") || canvas.getContext("webgl");
+  if (!gl) {
+    viewerInfo.textContent = "WebGL недоступен в этом браузере/драйвере. Предпросмотр невозможен.";
+    throw new Error("WebGL not available");
+  }
+
+  let renderer, scene, camera, controls, currentMesh;
+
+  function initPreview(){
+    renderer = new THREE.WebGLRenderer({ canvas, antialias:true });
+    renderer.setPixelRatio(window.devicePixelRatio || 1);
+
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0f1220);
+
+    camera = new THREE.PerspectiveCamera(45, 1, 0.01, 10000);
+    camera.position.set(3,3,3);
+
+    controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x223355, 1.0));
+    const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+    dir.position.set(5,8,3);
+    scene.add(dir);
+
+    scene.add(new THREE.GridHelper(10, 20, 0x2a2f4a, 0x1b1f33));
+    scene.add(new THREE.AxesHelper(2)); // чтобы точно видеть, что рендер идёт
+
+    onResize();
+    animate();
+
+    viewerInfo.textContent = "Сетка и оси должны быть видны. После конвертации появится модель.";
+  }
+
+  function onResize(){
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    if (w === 0 || h === 0) return; // на всякий случай
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+  window.addEventListener("resize", onResize);
+
+  function animate(){
+    controls.update();
+    renderer.render(scene, camera);
+    requestAnimationFrame(animate);
+  }
+
+  function buildGeometryForPreview(model){
+    const positions = [];
+    for (let m=0;m<model.allVertices.length;m++){
+      const verts=model.allVertices[m], tris=model.allTriangles[m];
+      for (const [a,b,c] of tris){
+        positions.push(...verts[a], ...verts[b], ...verts[c]);
+      }
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute("position", new THREE.Float32BufferAttribute(positions,3));
+    geom.computeVertexNormals();
+    return geom;
+  }
+
+  function fitCameraToObject(object){
+    const box = new THREE.Box3().setFromObject(object);
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    const maxSize = Math.max(size.x,size.y,size.z) || 1;
+    const dist = maxSize * 1.5 / Math.tan((camera.fov*Math.PI/180)/2);
+
+    camera.position.set(center.x+dist, center.y+dist, center.z+dist);
+    camera.near = dist/100;
+    camera.far  = dist*100;
+    camera.updateProjectionMatrix();
+
+    controls.target.copy(center);
+    controls.update();
+  }
+
+  window.renderPreview = function(model){
+    if (currentMesh){
+      scene.remove(currentMesh);
+      currentMesh.geometry.dispose();
+      currentMesh.material.dispose();
+    }
+
+    const geom = buildGeometryForPreview(model);
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0x8fb3ff, roughness:0.6, metalness:0.1, side:THREE.DoubleSide
+    });
+
+    currentMesh = new THREE.Mesh(geom, mat);
+    scene.add(currentMesh);
+    fitCameraToObject(currentMesh);
+
+    viewerInfo.textContent =
+      `Вершины: ${model.totalVerts} | Треугольники: ${model.totalTris} | Meshes: ${model.allVertices.length}`;
+  };
+
+  // Инициализируем после того как layout точно готов
+  requestAnimationFrame(initPreview);
+</script>
+
+</body>
+</html>
