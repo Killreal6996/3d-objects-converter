@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>3MA → STL (offline)</title>
+  <title>3MA → STL</title>
   <style>
     html, body { height: 100%; }
     body{
@@ -30,9 +30,19 @@
     }
     .panel label{display:block;font-size:13px;color:#aab0c5;margin-bottom:6px;}
     input[type=file]{width:100%;color:#cfd3e3;}
+    input[type=number], select{
+      width:100%; padding:8px 10px; border-radius:8px;
+      border:1px solid #2a2f4a; background:#0b0e1b; color:#e6e8ef;
+      box-sizing:border-box;
+    }
+    .row{display:grid;grid-template-columns:1fr 1fr; gap:8px;}
     button{
       width:100%;padding:10px 12px;border:0;border-radius:10px;
       background:#4b7cff;color:white;font-weight:600;cursor:pointer;
+      margin-top:8px;
+    }
+    button.secondary{
+      background:#1a1f36;border:1px solid #2a2f4a;color:#cfe0ff;
     }
     button:disabled{opacity:.5;cursor:not-allowed;}
     .meta{font-size:12px;color:#aab0c5;line-height:1.5;margin-top:8px;white-space:pre-wrap;}
@@ -42,11 +52,9 @@
     .viewer{
       position:relative;
       height:100%;
-      min-height:0;
       overflow:hidden;
       background:#0f1220;
     }
-    /* canvas растягиваем абсолютом — так он точно не будет 0px */
     #canvas{
       position:absolute; inset:0;
       width:100%; height:100%;
@@ -67,8 +75,7 @@
 </head>
 <body>
 <header>
-  <strong>3MA → STL</strong>
-  <span style="font-size:12px;color:#aab0c5">Полностью офлайн</span>
+  <strong>3ma конвертер разработанный командой BitA</strong>
 </header>
 
 <main>
@@ -80,7 +87,23 @@
       <div id="fileInfo" class="meta">Файл не выбран</div>
     </div>
 
-    <h2>2) Конвертация</h2>
+    <h2>2) Масштабирование</h2>
+    <div class="box">
+      <label>Масштаб (коэффициент):</label>
+      <div class="row">
+        <input id="scaleInput" type="number" step="0.001" value="1" min="0.0001" />
+        <select id="unitSelect">
+          <option value="1">в единицах модели</option>
+          <option value="0.001">мм (если модель в метрах)</option>
+          <option value="0.01">см (если модель в метрах)</option>
+          <option value="1">м</option>
+        </select>
+      </div>
+      <button id="applyScaleBtn" class="secondary">Применить масштаб</button>
+      <div id="scaleInfo" class="meta">Текущий масштаб: 1.0×</div>
+    </div>
+
+    <h2>3) Конвертация</h2>
     <div class="box">
       <button id="convertBtn" disabled>Конвертировать в STL</button>
       <a id="downloadLink" class="download" style="display:none;" download>Скачать STL</a>
@@ -96,7 +119,7 @@
   </section>
 
   <section class="viewer">
-    <div class="toolbar" id="viewerInfo">Если WebGL доступен, вы увидите сетку и оси сразу.</div>
+    <div class="toolbar" id="viewerInfo">Сетка, оси и “линейка” должны быть видны сразу. Модель появится после конвертации.</div>
     <canvas id="canvas"></canvas>
   </section>
 </main>
@@ -107,6 +130,23 @@
   const convertBtn   = document.getElementById("convertBtn");
   const downloadLink = document.getElementById("downloadLink");
   const convertInfo  = document.getElementById("convertInfo");
+
+  const scaleInput   = document.getElementById("scaleInput");
+  const unitSelect   = document.getElementById("unitSelect");
+  const applyScaleBtn= document.getElementById("applyScaleBtn");
+  const scaleInfo    = document.getElementById("scaleInfo");
+
+  let currentScale = 1.0;
+
+  function setScaleFromUI(){
+    const s = parseFloat(scaleInput.value || "1");
+    const unitMul = parseFloat(unitSelect.value || "1");
+    currentScale = s * unitMul;
+    scaleInfo.textContent = `Текущий масштаб: ${currentScale.toFixed(6)}×`;
+    if (window.applyPreviewScale) window.applyPreviewScale(currentScale);
+  }
+
+  applyScaleBtn.addEventListener("click", setScaleFromUI);
 
   function parse3MA(jsonText){
     const data = JSON.parse(jsonText);
@@ -162,12 +202,18 @@
       const verts=model.allVertices[m], tris=model.allTriangles[m];
       for (const [a,b,c] of tris){
         const v1=verts[a], v2=verts[b], v3=verts[c];
-        const [nx,ny,nz]=calcNormal(v1,v2,v3);
+
+        // применяем масштаб при экспорте
+        const sv1=[v1[0]*currentScale, v1[1]*currentScale, v1[2]*currentScale];
+        const sv2=[v2[0]*currentScale, v2[1]*currentScale, v2[2]*currentScale];
+        const sv3=[v3[0]*currentScale, v3[1]*currentScale, v3[2]*currentScale];
+
+        const [nx,ny,nz]=calcNormal(sv1,sv2,sv3);
         lines.push(`  facet normal ${nx} ${ny} ${nz}`);
         lines.push(`    outer loop`);
-        lines.push(`      vertex ${v1[0]} ${v1[1]} ${v1[2]}`);
-        lines.push(`      vertex ${v2[0]} ${v2[1]} ${v2[2]}`);
-        lines.push(`      vertex ${v3[0]} ${v3[1]} ${v3[2]}`);
+        lines.push(`      vertex ${sv1[0]} ${sv1[1]} ${sv1[2]}`);
+        lines.push(`      vertex ${sv2[0]} ${sv2[1]} ${sv2[2]}`);
+        lines.push(`      vertex ${sv3[0]} ${sv3[1]} ${sv3[2]}`);
         lines.push(`    endloop`);
         lines.push(`  endfacet`);
       }
@@ -189,9 +235,11 @@
     convertBtn.disabled=true;
     convertInfo.className="meta";
     convertInfo.textContent="Конвертирую...";
+
     try{
       const file=fileInput.files&&fileInput.files[0];
       if(!file) throw new Error("Файл не выбран");
+
       const text=await file.text();
       const model=parse3MA(text);
       const stlText=buildAsciiSTL(model);
@@ -205,10 +253,12 @@
       downloadLink.textContent="Скачать "+downloadLink.download;
       downloadLink.style.display="block";
 
-      convertInfo.textContent=`Готово.\nMeshes: ${model.allVertices.length}\nВершин: ${model.totalVerts}\nТреугольников: ${model.totalTris}`;
+      convertInfo.textContent=
+        `Готово.\nMeshes: ${model.allVertices.length}\nВершин: ${model.totalVerts}\nТреугольников: ${model.totalTris}\nМасштаб: ${currentScale.toFixed(6)}×`;
       convertInfo.className="meta ok";
 
       if(window.renderPreview) window.renderPreview(model);
+
     }catch(err){
       convertInfo.textContent="Ошибка: "+err.message;
       convertInfo.className="meta error";
@@ -217,6 +267,9 @@
       convertBtn.disabled=false;
     }
   });
+
+  // применим масштаб сразу при загрузке страницы
+  setScaleFromUI();
 </script>
 
 <script type="module">
@@ -226,14 +279,78 @@
   const canvas = document.getElementById("canvas");
   const viewerInfo = document.getElementById("viewerInfo");
 
-  // Проверка WebGL
-  const gl = canvas.getContext("webgl2") || canvas.getContext("webgl");
-  if (!gl) {
-    viewerInfo.textContent = "WebGL недоступен в этом браузере/драйвере. Предпросмотр невозможен.";
-    throw new Error("WebGL not available");
+  let renderer, scene, camera, controls, currentMesh;
+  let previewScale = 1.0;
+  const rulerGroup = new THREE.Group();
+
+  function makeTextSprite(text){
+    const c = document.createElement("canvas");
+    const ctx = c.getContext("2d");
+    const fontSize = 48;
+    ctx.font = `${fontSize}px sans-serif`;
+    const padding = 10;
+    const w = Math.ceil(ctx.measureText(text).width + padding*2);
+    const h = fontSize + padding*2;
+    c.width = w; c.height = h;
+    ctx.font = `${fontSize}px sans-serif`;
+    ctx.fillStyle = "white";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, padding, h/2);
+    const tex = new THREE.CanvasTexture(c);
+    const mat = new THREE.SpriteMaterial({ map: tex, depthTest:false, depthWrite:false });
+    const spr = new THREE.Sprite(mat);
+    spr.scale.set(0.25, 0.125, 1);
+    return spr;
   }
 
-  let renderer, scene, camera, controls, currentMesh;
+  function buildRuler({tickStep=1, tickCount=10}){
+    rulerGroup.clear();
+
+    const tickLen = 0.08;
+    const mat = new THREE.LineBasicMaterial({ color: 0x9aa4c7 });
+    const pts = [];
+
+    function addTick(x,y,z, dx,dy,dz){
+      pts.push(new THREE.Vector3(x,y,z));
+      pts.push(new THREE.Vector3(x+dx,y+dy,z+dz));
+    }
+
+    for (let i=0;i<=tickCount;i++){
+      const t = i*tickStep;
+
+      // X axis ticks
+      addTick(t,0,0, 0, tickLen, 0);
+      const sx = makeTextSprite(String(i));
+      sx.position.set(t, 0.18, 0);
+      rulerGroup.add(sx);
+
+      // Y axis ticks
+      addTick(0,t,0, tickLen, 0, 0);
+      const sy = makeTextSprite(String(i));
+      sy.position.set(0.18, t, 0);
+      rulerGroup.add(sy);
+
+      // Z axis ticks
+      addTick(0,0,t, tickLen, 0, 0);
+      const sz = makeTextSprite(String(i));
+      sz.position.set(0.18, 0, t);
+      rulerGroup.add(sz);
+    }
+
+    const geom = new THREE.BufferGeometry().setFromPoints(pts);
+    const lines = new THREE.LineSegments(geom, mat);
+    rulerGroup.add(lines);
+
+    // Названия осей
+    const ax = makeTextSprite("X");
+    ax.position.set(tickCount*tickStep + 0.4, 0, 0); rulerGroup.add(ax);
+    const ay = makeTextSprite("Y");
+    ay.position.set(0, tickCount*tickStep + 0.4, 0); rulerGroup.add(ay);
+    const az = makeTextSprite("Z");
+    az.position.set(0, 0, tickCount*tickStep + 0.4); rulerGroup.add(az);
+
+    return rulerGroup;
+  }
 
   function initPreview(){
     renderer = new THREE.WebGLRenderer({ canvas, antialias:true });
@@ -253,19 +370,21 @@
     dir.position.set(5,8,3);
     scene.add(dir);
 
-    scene.add(new THREE.GridHelper(10, 20, 0x2a2f4a, 0x1b1f33));
-    scene.add(new THREE.AxesHelper(2)); // чтобы точно видеть, что рендер идёт
+    scene.add(new THREE.GridHelper(20, 40, 0x2a2f4a, 0x1b1f33));
+    scene.add(new THREE.AxesHelper(2));
+
+    scene.add(buildRuler({tickStep:1, tickCount:10}));
 
     onResize();
     animate();
 
-    viewerInfo.textContent = "Сетка и оси должны быть видны. После конвертации появится модель.";
+    viewerInfo.textContent = "Сетка, оси и линейка активны. После конвертации появится модель.";
   }
 
   function onResize(){
     const w = canvas.clientWidth;
     const h = canvas.clientHeight;
-    if (w === 0 || h === 0) return; // на всякий случай
+    if (w===0||h===0) return;
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
@@ -283,7 +402,11 @@
     for (let m=0;m<model.allVertices.length;m++){
       const verts=model.allVertices[m], tris=model.allTriangles[m];
       for (const [a,b,c] of tris){
-        positions.push(...verts[a], ...verts[b], ...verts[c]);
+        positions.push(
+          verts[a][0]*previewScale, verts[a][1]*previewScale, verts[a][2]*previewScale,
+          verts[b][0]*previewScale, verts[b][1]*previewScale, verts[b][2]*previewScale,
+          verts[c][0]*previewScale, verts[c][1]*previewScale, verts[c][2]*previewScale
+        );
       }
     }
     const geom = new THREE.BufferGeometry();
@@ -308,7 +431,15 @@
     controls.update();
   }
 
+  window.applyPreviewScale = function(scale){
+    previewScale = scale || 1.0;
+    // если модель уже на сцене — пересоберём её
+    if (window._lastModelForPreview) window.renderPreview(window._lastModelForPreview);
+  };
+
   window.renderPreview = function(model){
+    window._lastModelForPreview = model;
+
     if (currentMesh){
       scene.remove(currentMesh);
       currentMesh.geometry.dispose();
@@ -325,10 +456,9 @@
     fitCameraToObject(currentMesh);
 
     viewerInfo.textContent =
-      `Вершины: ${model.totalVerts} | Треугольники: ${model.totalTris} | Meshes: ${model.allVertices.length}`;
+      `Вершины: ${model.totalVerts} | Треугольники: ${model.totalTris} | Meshes: ${model.allVertices.length} | Масштаб: ${previewScale.toFixed(6)}×`;
   };
 
-  // Инициализируем после того как layout точно готов
   requestAnimationFrame(initPreview);
 </script>
 
